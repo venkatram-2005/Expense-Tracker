@@ -5,6 +5,8 @@ const { createExpenseController } = require('./controllers/expense-controller');
 const { AppError } = require('./errors/app-error');
 const { openapi } = require('./openapi');
 
+const MAX_BODY_BYTES = 1_048_576;
+
 function sendJson(res, statusCode, payload) {
   res.writeHead(statusCode, { 'content-type': 'application/json; charset=utf-8' });
   res.end(JSON.stringify(payload));
@@ -13,7 +15,16 @@ function sendJson(res, statusCode, payload) {
 function readJsonBody(req) {
   return new Promise((resolve, reject) => {
     let body = '';
-    req.on('data', (chunk) => { body += chunk; });
+    let size = 0;
+    req.on('data', (chunk) => {
+      size += chunk.length;
+      if (size > MAX_BODY_BYTES) {
+        reject(new AppError('Request body must not exceed 1 MB', 413));
+        req.destroy();
+        return;
+      }
+      body += chunk;
+    });
     req.on('end', () => {
       try { resolve(body ? JSON.parse(body) : {}); } catch { reject(new Error('Malformed JSON body')); }
     });
@@ -24,12 +35,21 @@ function readJsonBody(req) {
 function createApp({ repository = new ExpenseRepository() } = {}) {
   const controller = createExpenseController(new ExpenseService(repository));
   return http.createServer(async (req, res) => {
-    const url = new URL(req.url, 'http://localhost');
-    const query = Object.fromEntries(url.searchParams);
     try {
+      const url = new URL(req.url, 'http://localhost');
+      const categoryParameters = url.searchParams.getAll('category');
+      if (categoryParameters.length > 1) throw new AppError('category query parameter may only be provided once', 400);
+      const query = Object.fromEntries(url.searchParams);
       if (req.method === 'GET' && url.pathname === '/health') return sendJson(res, 200, { status: 'ok' });
       if (req.method === 'GET' && url.pathname === '/api-docs/openapi.json') return sendJson(res, 200, openapi);
       if (req.method === 'POST' && url.pathname === '/expenses') {
+        const contentType = req.headers['content-type'];
+        if (!contentType?.toLowerCase().startsWith('application/json')) {
+          throw new AppError('Content-Type must be application/json', 415);
+        }
+        if (Number(req.headers['content-length']) > MAX_BODY_BYTES) {
+          throw new AppError('Request body must not exceed 1 MB', 413);
+        }
         const data = controller.create({ body: await readJsonBody(req) });
         return sendJson(res, 201, data);
       }

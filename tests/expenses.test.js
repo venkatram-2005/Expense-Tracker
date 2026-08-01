@@ -44,9 +44,44 @@ test('rejects invalid input and reports missing expenses', async () => {
   await withServer(async (baseUrl) => {
     const invalid = await request(baseUrl, '/expenses', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ ...expense, amount: -1, date: '2026-02-30' }) });
     assert.equal(invalid.response.status, 400);
-    assert.deepEqual(invalid.body.error.details, ['amount must be a positive number', 'date must be a valid ISO date in YYYY-MM-DD format']);
+    assert.deepEqual(invalid.body.error.details, ['amount must be a positive number with at most 2 decimal places', 'date must be a valid ISO date in YYYY-MM-DD format']);
     const missing = await request(baseUrl, '/expenses/not-here', { method: 'DELETE' });
     assert.equal(missing.response.status, 404);
+  });
+});
+
+test('rejects invalid payload shapes, money values, query values, and content types', async () => {
+  await withServer(async (baseUrl) => {
+    const cases = [
+      [{ ...expense, amount: 1.999 }, 'amount must be a positive number with at most 2 decimal places'],
+      [{ ...expense, title: '   ' }, 'title must be a non-empty string'],
+      [{ ...expense, category: '' }, 'category must be a non-empty string'],
+      [{ ...expense, extra: true }, 'unknown field(s): extra']
+    ];
+    for (const [payload, expectedError] of cases) {
+      const result = await request(baseUrl, '/expenses', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(payload) });
+      assert.equal(result.response.status, 400);
+      assert.ok(result.body.error.details.includes(expectedError));
+    }
+    const notAnObject = await request(baseUrl, '/expenses', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '[]' });
+    assert.equal(notAnObject.response.status, 400);
+    const wrongContentType = await request(baseUrl, '/expenses', { method: 'POST', headers: { 'content-type': 'text/plain' }, body: '{}' });
+    assert.equal(wrongContentType.response.status, 415);
+    const emptyCategory = await request(baseUrl, '/expenses?category=%20%20');
+    assert.equal(emptyCategory.response.status, 400);
+    const repeatedCategory = await request(baseUrl, '/expenses?category=Food&category=Transport');
+    assert.equal(repeatedCategory.response.status, 400);
+  });
+});
+
+test('calculates money totals without floating-point rounding errors', async () => {
+  await withServer(async (baseUrl) => {
+    for (const amount of [0.1, 0.2]) {
+      const result = await request(baseUrl, '/expenses', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ ...expense, amount }) });
+      assert.equal(result.response.status, 201);
+    }
+    const total = await request(baseUrl, '/expenses/total');
+    assert.equal(total.body.data.total, 0.3);
   });
 });
 
